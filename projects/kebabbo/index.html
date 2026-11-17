@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KEBABBO.TOP</title>
+<meta name="description" content="il kebab gira, sempre.">
+<meta property="og:title" content="KEBABBO.TOP">
+<meta property="og:description" content="il kebab gira, sempre.">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥙</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bungee&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block;
+    object-fit: contain; background: #000; }
+</style>
+</head>
+<body>
+<canvas id="view" aria-label="A döner kebab turning on its skewer, drawn with letters, above a neon sign reading KEBABBO.TOP"></canvas>
+
+<script>
+"use strict";
+// ================================================================ grid
+// The picture is drawn in "units": one row is 1 unit tall, and a column is UNIT units wide, so units are square.
+const FONT_SIZE = 10, FPS = 30;
+const FONT = `${FONT_SIZE}px Menlo, Consolas, "DejaVu Sans Mono", "Courier New", monospace`;
+const probe = document.createElement("canvas").getContext("2d");
+probe.font = FONT;
+const CW = Math.max(1, Math.round(probe.measureText("M").width)), CH = Math.round(FONT_SIZE * 1.15);
+const UNIT = CW / CH;
+const ASPECT = innerWidth / Math.max(1, innerHeight), PORTRAIT = ASPECT < 1;
+const SCENE_W = 84, SCENE_H = PORTRAIT ? 140 : 122;      // the whole picture must fit in this box (phones: 2-line sign)
+const ROWS = Math.min(320, Math.ceil(Math.max(SCENE_H * 1.06, SCENE_W * 1.1 / ASPECT)));
+const COLS = Math.min(900, Math.max(60, Math.round(ROWS * ASPECT / UNIT)));
+const N = COLS * ROWS, Y_OFF = (ROWS - SCENE_H) / 2;
+const X = new Float32Array(COLS), Y = new Float32Array(ROWS);
+for (let c = 0; c < COLS; c++) X[c] = (c + 0.5 - COLS / 2) * UNIT;
+for (let r = 0; r < ROWS; r++) Y[r] = r + 0.5 - Y_OFF;
+const colOf = (x) => x / UNIT + COLS / 2, rowOf = (y) => y + Y_OFF;
+
+const lum = new Float32Array(N), rgb = new Float32Array(N * 3);
+function set(i, l, r, g, b) { lum[i] = l; const j = i * 3; rgb[j] = r; rgb[j + 1] = g; rgb[j + 2] = b; }
+function put(x, y, l, r, g, b, front = false) {           // light one cell if brighter (or if it is in front)
+  const c = Math.floor(colOf(x)), rr = Math.floor(rowOf(y));
+  if (c < 0 || c >= COLS || rr < 0 || rr >= ROWS) return;
+  const i = rr * COLS + c;
+  if (front || l > lum[i]) set(i, l, r, g, b);
+}
+
+// ================================================================ maths
+const TAU = Math.PI * 2;
+const clamp = (x, lo = 0, hi = 1) => (x < lo ? lo : x > hi ? hi : x);
+function smoothstep(a, b, x) { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); }
+const mix = (a, b, k) => a + (b - a) * k;
+const mix3 = (a, b, k) => { k = clamp(k); return [mix(a[0], b[0], k), mix(a[1], b[1], k), mix(a[2], b[2], k)]; };
+function hash3(a, b, c) {
+  let h = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663) ^ Math.imul(c, 83492791)) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+const rnd = (a, b = 0, c = 0) => hash3(a, b, c + 7) / 4294967296;      // fixed pseudo-random 0..1
+const hv = (a, b, c) => hash3(a, b, c) / 2147483648 - 1;
+function vnoise(x, y, z) {                                // smooth value noise, about -1..1
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  let u = x - xi, v = y - yi, w = z - zi;
+  u = u * u * (3 - 2 * u); v = v * v * (3 - 2 * v); w = w * w * (3 - 2 * w);
+  const a = mix(mix(hv(xi, yi, zi), hv(xi + 1, yi, zi), u), mix(hv(xi, yi + 1, zi), hv(xi + 1, yi + 1, zi), u), v);
+  const b = mix(mix(hv(xi, yi, zi + 1), hv(xi + 1, yi, zi + 1), u), mix(hv(xi, yi + 1, zi + 1), hv(xi + 1, yi + 1, zi + 1), u), v);
+  return mix(a, b, w);
+}
+// noise wrapped around the meat: seamless in the angle a, so the texture really goes round
+const around = (a, y, f, fy, seed) => vnoise(Math.cos(a) * f + seed * 5.3, Math.sin(a) * f + seed * 2.1, y * fy);
+
+// ================================================================ the döner
+const SPIN = TAU / 7;                                     // one full turn every 7 seconds
+const MEAT_TOP = 17, MEAT_BOT = 78, SKEWER_TOP = 3, SKEWER_BOT = 90, TRAY_Y = 86;
+const SEAR = [0.40, 0.15, 0.05], GOLD = [0.85, 0.48, 0.18], FRESH = [0.96, 0.66, 0.42], CHAR = [0.20, 0.07, 0.03];
+const STEEL = [0.70, 0.73, 0.80], FIRE = [1.0, 0.42, 0.10];
+const LIGHT = (() => { const v = [-0.45, -0.2, 0.87], m = Math.hypot(...v); return v.map((k) => k / m); })();
+
+function meatR(y) {                                       // upside-down cone, a bit uneven
+  const v = (y - MEAT_TOP) / (MEAT_BOT - MEAT_TOP);
+  if (v <= 0 || v >= 1) return 0;
+  let R = 8.5 + 13.5 * Math.pow(1 - v, 0.85) + 1.1 * Math.sin(v * 9);
+  R *= Math.sqrt(clamp(v / 0.05)) * Math.sqrt(clamp((1 - v) / 0.03));   // rounded top and bottom
+  return R;
+}
+
+function drawSkewer() {
+  for (let r = 0; r < ROWS; r++) {
+    const y = Y[r];
+    if (y < SKEWER_TOP || y > SKEWER_BOT) continue;
+    const hw = 0.55 * smoothstep(SKEWER_TOP, SKEWER_TOP + 3, y) + 0.12;   // pointed tip
+    for (let c = Math.floor(colOf(-hw)); c <= Math.ceil(colOf(hw)); c++) {
+      if (c < 0 || c >= COLS || Math.abs(X[c]) > hw + UNIT * 0.5) continue;
+      const shine = X[c] < 0 ? 0.85 : 0.55;
+      set(r * COLS + c, shine, STEEL[0], STEEL[1], STEEL[2]);
+    }
+  }
+}
+
+function drawMeat(t) {
+  const spin = t * SPIN;
+  const r0 = Math.max(0, Math.floor(rowOf(MEAT_TOP))), r1 = Math.min(ROWS, Math.ceil(rowOf(MEAT_BOT)));
+  for (let r = r0; r < r1; r++) {
+    const y = Y[r], R = meatR(y);
+    if (R <= 0.2) continue;
+    const dR = meatR(y + 0.5) - meatR(y - 0.5);
+    // lumpy silhouette: the edges belong to the meat, so they turn with it
+    const Rl = R * (1 + 0.07 * around(spin - Math.PI / 2, y, 2.5, 0.35, 11) + 0.03 * around(spin - Math.PI / 2, y, 7, 0.9, 12));
+    const Rr = R * (1 + 0.07 * around(spin + Math.PI / 2, y, 2.5, 0.35, 11) + 0.03 * around(spin + Math.PI / 2, y, 7, 0.9, 12));
+    const c0 = Math.max(0, Math.floor(colOf(-Rl))), c1 = Math.min(COLS, Math.ceil(colOf(Rr)));
+    for (let c = c0; c < c1; c++) {
+      const x = X[c], s = x < 0 ? x / Rl : x / Rr;
+      if (s <= -1 || s >= 1) continue;
+      const phi = Math.asin(s), cphi = Math.cos(phi), a = phi + spin;
+      // surface normal (x right, y down, z towards you)
+      const nl = Math.hypot(s, dR, cphi), nx = s / nl, ny = -dR / nl, nz = cphi / nl;
+      const diff = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+      const rim = Math.pow(clamp(s), 3) * 0.7;                               // the grill glows behind, on the right
+      // texture: big seared patches, fine grain, and the stacked slices of meat
+      const n1 = around(a, y, 2.2, 0.16, 1), n2 = around(a, y, 6.5, 0.5, 2);
+      const layer = Math.sin(y * 1.55 + 2.4 * n1 + 1.4 * n2);
+      const groove = smoothstep(0.72, 0.97, layer);
+      let col = mix3(SEAR, GOLD, 0.5 + 0.7 * n1 + 0.35 * n2);
+      col = mix3(col, FRESH, smoothstep(0.35, 0.8, n1 + 0.3 * n2) * 0.7);    // juicy lighter spots
+      let tex = 1 - 0.5 * groove;
+      if (n2 > 0.5 && n1 < 0.05) { col = CHAR; tex *= 0.6; }                  // charred crispy bits
+      let l = (0.34 + 0.72 * diff) * tex * (0.6 + 0.4 * Math.sqrt(cphi));
+      // glistening fat: fixed specks on the meat that catch the light as they come round
+      const speck = hash3(Math.floor(a * 26 + 1000), Math.floor(y * 1.3), 9) % 100 < 5;
+      if (speck) { const sp = Math.pow(diff, 8) * 0.9; l += sp; col = mix3(col, [1, 0.92, 0.75], sp * 1.5); }
+      if (rim > 0.02) { l += rim * 0.6; col = mix3(col, FIRE, rim * 1.2); }
+      set(r * COLS + c, clamp(l), col[0], col[1], col[2]);
+    }
+  }
+}
+
+function drawTomato(t) {                                  // a tomato on top, turning with the meat
+  const cx = 0, cy = MEAT_TOP - 3.4, R = 4.3, spin = t * SPIN;
+  for (let r = Math.floor(rowOf(cy - R)); r <= Math.ceil(rowOf(cy + R)); r++) {
+    if (r < 0 || r >= ROWS) continue;
+    const dy = (Y[r] - cy) / R;
+    for (let c = Math.floor(colOf(cx - R * 1.1)); c <= Math.ceil(colOf(cx + R * 1.1)); c++) {
+      if (c < 0 || c >= COLS) continue;
+      const dx = (X[c] - cx) / (R * 1.1);                                    // a bit squashed, like a tomato
+      const d2 = dx * dx + dy * dy;
+      if (d2 >= 1) continue;
+      const nz = Math.sqrt(1 - d2);
+      const diff = Math.max(0, dx * LIGHT[0] + dy * LIGHT[1] + nz * LIGHT[2]);
+      let l = 0.25 + 0.7 * diff, col = [0.85, 0.1, 0.05];
+      const hl = Math.pow(diff, 14);                                         // shiny skin
+      if (hl > 0.3) { col = mix3(col, [1, 0.9, 0.85], hl); l += hl * 0.3; }
+      if (dy < -0.55) {                                                      // green leaves on top, turning
+        const th = Math.asin(clamp(dx / Math.sqrt(Math.max(1e-3, 1 - dy * dy)), -1, 1)) + spin;
+        if (Math.cos(th * 5) > 0.15 - (dy + 0.55) * 1.5) { col = [0.25, 0.7, 0.2]; l = 0.35 + 0.4 * diff; }
+      }
+      l += Math.pow(clamp(dx), 3) * 0.4;
+      set(r * COLS + c, clamp(l), col[0], col[1], col[2]);
+    }
+  }
+}
+
+function drawTray() {                                     // the drip tray under the meat
+  const rx = 17, ry = 2.4;
+  for (let r = Math.floor(rowOf(TRAY_Y - ry - 1)); r <= Math.ceil(rowOf(TRAY_Y + ry + 1)); r++) {
+    if (r < 0 || r >= ROWS) continue;
+    for (let c = Math.floor(colOf(-rx - 1)); c <= Math.ceil(colOf(rx + 1)); c++) {
+      if (c < 0 || c >= COLS) continue;
+      const dx = X[c] / rx, dy = (Y[r] - TRAY_Y) / ry, d = Math.hypot(dx, dy);
+      if (d > 1.05) continue;
+      if (d > 0.78 || (dy > 0.3 && d > 0.6)) set(r * COLS + c, 0.5 + 0.35 * (dx < -0.3 ? 1 : 0) + 0.15 * dy, STEEL[0], STEEL[1], STEEL[2]);
+      else set(r * COLS + c, 0.2 + 0.12 * Math.sin(dx * 9 + dy * 3), 0.75, 0.42, 0.12);   // pool of fat
+    }
+  }
+}
+
+// ================================================================ things that move around it
+function drawDrips(t) {                                   // fat dripping from the bottom of the meat
+  for (let k = 0; k < 7; k++) {
+    const period = 1.1 + rnd(k, 1) * 1.6, ph = t / period + rnd(k, 2), cyc = Math.floor(ph), u = ph - cyc;
+    const x = (rnd(k, cyc, 3) - 0.5) * 2 * meatR(MEAT_BOT - 2) * 0.9;
+    const fall = smoothstep(0.35, 1, u);                                    // hangs, swells, then falls
+    const y = MEAT_BOT - 0.5 + fall * fall * (TRAY_Y - MEAT_BOT);
+    put(x, y, 0.55 + 0.3 * (1 - fall), 1, 0.78, 0.35);
+  }
+}
+function drawSteam(t) {                                   // soft steam curling up from the top
+  for (let k = 0; k < 10; k++) {
+    const life = 3 + rnd(k, 4) * 2, u = (t / life + rnd(k, 5)) % 1;
+    const x0 = (rnd(k, Math.floor(t / life + rnd(k, 5)), 6) - 0.5) * 22;
+    const x = x0 + 4 * Math.sin(u * 5 + k) * u, y = MEAT_TOP - 4 - u * Math.min(40, MEAT_TOP + Y_OFF + 4);
+    const l = 0.14 * Math.sin(Math.PI * u);
+    for (const [ox, oy] of [[0, 0], [UNIT, 0], [-UNIT, 0], [0, -1]]) put(x + ox, y + oy, l, 0.8, 0.76, 0.72);
+  }
+}
+function drawEmbers(t) {                                  // little sparks rising from the grill
+  for (let k = 0; k < 22; k++) {
+    const life = 2.5 + rnd(k, 7) * 2.5, ph = t / life + rnd(k, 8), u = ph % 1, cyc = Math.floor(ph);
+    const x = (rnd(k, cyc, 9) - 0.5) * 60 + Math.sin(t * 2 + k) * 2;
+    const y = TRAY_Y - u * 90;
+    const tw = hash3(k, Math.floor(t * 12), 10) % 4 ? 1 : 0.4;
+    put(x, y, 0.55 * (1 - u) * tw, 1, 0.5 + 0.3 * (1 - u), 0.12);
+  }
+}
+// ================================================================ the scimitar
+// A curved scimitar pushed into the döner: hilt down on the right, blade tilted up, tip hidden behind the meat.
+// It stays put while the meat turns against its edge, so chunky shavings keep curling off where they touch.
+const BLADE = 42, GUARD = 1.8, GRIP = 8, POMMEL = 2.2;    // lengths along the sword
+const GUARD_W = 4.6, GRIP_W = 1.2;                       // half-widths
+const CURVE = 14;                                         // how far the tip bends away from a straight line
+const GOLDEN = [0.95, 0.72, 0.25], LEATHER = [0.42, 0.2, 0.1];
+const SWORD = { x: -4.3, y: 33.2, ang: 0.6 };               // where a straight blade's tip would be; ang: tilt
+const SW_CA = Math.cos(SWORD.ang), SW_SA = Math.sin(SWORD.ang);
+// s = distance from the guard towards the tip (0..BLADE)
+const bendAt = (s) => -CURVE * (s / BLADE) ** 1.2;       // the blade sweeps upwards (v < 0 is up)
+// scimitar profile, measured from the centre line: a thin spine on the inner (upper) side, and a broad
+// belly with the cutting edge on the outer (lower) side that flares out wide towards the tip
+const spineW = (s) => 1.0 + 0.5 * (s / BLADE);
+const edgeW = (s) => {
+  const k = s / BLADE;
+  return (2.0 + 4.2 * smoothstep(0.03, 0.5, k)) * Math.min(1, (1 - k) / 0.12 + 0.05);
+};
+const bladeAt = (s) => {                                  // point on the blade's centre line
+  const u = BLADE - s, b = bendAt(s);
+  return { x: SWORD.x + u * SW_CA - b * SW_SA, y: SWORD.y + u * SW_SA + b * SW_CA };
+};
+const CONTACT = (() => {                                  // where the blade comes out of the meat's right side
+  for (let s = BLADE; s > 0; s -= 0.05) {
+    const p = bladeAt(s);
+    if (p.x > meatR(p.y)) return { s, x: p.x, y: p.y - spineW(s) };          // just above the blade
+  }
+  const p = bladeAt(0);
+  return { s: 0, x: p.x, y: p.y };
+})();
+
+function drawSword(t) {                                   // drawn before the meat, so the meat hides the tip
+  const total = BLADE + GUARD + GRIP + POMMEL * 2;
+  const gl = (t % 5) / 0.9;                               // every 5 s a glint runs from the guard to the meat
+  const glint = gl < 1 ? mix(0, CONTACT.s, gl) : -99;
+  const ex = SWORD.x + total * SW_CA, ey = SWORD.y + total * SW_SA;
+  const r0 = Math.max(0, Math.floor(rowOf(SWORD.y - 12))), r1 = Math.min(ROWS, Math.ceil(rowOf(ey + 14)));
+  const c0 = Math.max(0, Math.floor(colOf(SWORD.x - 16))), c1 = Math.min(COLS, Math.ceil(colOf(ex + 12)));
+  for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) {
+    const dx = X[c] - SWORD.x, dy = Y[r] - SWORD.y;
+    const u = dx * SW_CA + dy * SW_SA, v = -dx * SW_SA + dy * SW_CA;   // u: along the straight axis from the tip, v: across
+    let l, col;
+    if (u >= 0 && u < BLADE) {                            // curved blade, bright cutting edge along the bottom
+      const s = BLADE - u, sw = spineW(s), ew = edgeW(s), vv = v - bendAt(s);
+      if (vv < -sw || vv > ew) continue;
+      col = STEEL;
+      l = 0.45 + 0.4 * (vv + sw) / (sw + ew);                            // lighter towards the edge
+      if (vv < -sw + 0.5) l = 0.38;                                      // thick back of the blade
+      if (vv > ew - 0.7) { l = 0.95; col = [0.9, 0.93, 1]; }
+      if (Math.abs(s - glint) < 1.6) { l = 1; col = [1, 1, 1]; }
+    } else if (u >= BLADE && u < BLADE + GUARD) {          // crossguard
+      if (Math.abs(v) > GUARD_W) continue;
+      col = GOLDEN; l = 0.7 + 0.2 * (v < 0 ? 1 : 0);
+    } else if (u >= BLADE + GUARD && u < BLADE + GUARD + GRIP) {   // leather grip, hooking down at the end
+      const g = (u - BLADE - GUARD) / GRIP, vg = v - 1.6 * g * g;
+      if (Math.abs(vg) > GRIP_W) continue;
+      col = LEATHER; l = 0.45 + 0.2 * ((Math.floor((u + vg) * 1.4) & 1));
+    } else {                                              // round pommel
+      const pu = u - (BLADE + GUARD + GRIP + POMMEL), pv = v - 2.2;
+      if (pu * pu + pv * pv > POMMEL * POMMEL) continue;
+      col = GOLDEN; l = 0.75 + 0.2 * (v < 0 ? 1 : 0);
+    }
+    set(r * COLS + c, clamp(l), col[0], col[1], col[2]);
+  }
+}
+
+function drawCurl(cx, cy, R, rot, arc, crust, inner) {    // a curled strip of meat: crust outside, juicy inside
+  const steps = Math.ceil(arc * R * 3);
+  for (let j = 0; j <= steps; j++) {
+    const a = rot + arc * j / steps, ca = Math.cos(a), sa = Math.sin(a);
+    put(cx + ca * R, cy + sa * R * 0.9, 0.62, crust[0], crust[1], crust[2], true);
+    if (R > 0.9) put(cx + ca * (R - 0.75), cy + sa * (R - 0.75) * 0.9, 0.85, inner[0], inner[1], inner[2], true);
+  }
+}
+
+function drawShavings(t) {                                // chunky shavings curl off at the blade and drop
+  const K = 6, LIFE = 1.9, PEEL = 0.45;
+  for (let k = 0; k < K; k++) {
+    const ph = t / LIFE + k / K, cyc = Math.floor(ph), age = (ph - cyc) * LIFE;
+    const R = 1.6 + rnd(k, cyc, 23) * 1.2;                // curl size
+    const x0 = CONTACT.x, y0 = CONTACT.y + (rnd(k, cyc, 20) - 0.5) * 2.5;
+    const crust = mix3(SEAR, GOLD, 0.55), inner = mix3(GOLD, FRESH, 0.4 + 0.6 * rnd(k, cyc, 21));
+    if (age < PEEL) {                                     // peeling away from the meat, curling up as it goes
+      const p = age / PEEL;
+      drawCurl(x0 + R * p, y0 - 0.4 * p, R, Math.PI * 0.85, 0.7 + 2.5 * p, crust, inner);
+      continue;
+    }
+    const dt = age - PEEL, spinRate = 5 + 4 * rnd(k, cyc, 24);
+    const cx = x0 + R + (2.5 + 3 * rnd(k, cyc, 22)) * dt, cy = y0 - 0.4 + 28 * dt * dt;
+    if (cy - R > TRAY_Y) continue;                        // landed in the tray
+    drawCurl(cx, cy, R, Math.PI * 0.85 + dt * spinRate, 3.2, crust, inner);
+  }
+}
+
+const haloLum = new Float32Array(N);                      // faint warm haze behind everything
+for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+  const d2 = (X[c] / 34) ** 2 + ((Y[r] - 50) / 46) ** 2;
+  if (hash3(r, c, 1) % 100 < 30) haloLum[r * COLS + c] = 0.12 * Math.exp(-d2 * 1.8);
+}
+
+// ================================================================ neon sign
+const SIGN = "KEBABBO.TOP", SIGN_FONT = "Bungee, Impact, sans-serif", SIGN_Y = 104;
+const BROKEN = SIGN.lastIndexOf("O");                      // every sign has one letter that buzzes
+// the renderer brightens colours up to ~1.8x, so neon hues are kept low to stay coloured instead of white
+const AMBER = [0.62, 0.34, 0.05], PINK = [0.62, 0.11, 0.33], DOT = [0.6, 0.5, 0.36], CORE = [0.6, 0.52, 0.42];
+const SIGN_LINES = PORTRAIT ? ["KEBABBO", ".TOP"] : [SIGN];
+const sCov = new Float32Array(N), sHalo = new Float32Array(N), sLetter = new Int8Array(N);
+let signR0 = 0, signR1 = 0;                               // rows the sign (with its halo) covers
+
+function buildSign() {
+  const S = 4, RS = Math.max(1, Math.round(S / UNIT)), RW = COLS * S, RH = ROWS * RS, PXU = S / UNIT;
+  const g = document.createElement("canvas"); g.width = RW; g.height = RH;
+  const gx = g.getContext("2d", { willReadFrequently: true });
+  gx.textBaseline = "middle"; gx.fillStyle = "#fff";
+  gx.font = `100px ${SIGN_FONT}`;
+  const w100 = Math.max(...SIGN_LINES.map((l) => gx.measureText(l).width));
+  const availW = Math.min(COLS * UNIT * 0.9, SCENE_W * 1.3);                // units
+  const fs = Math.min(100 * availW * PXU / w100, (PORTRAIT ? 17 : 21) * PXU); // font size in raster px
+  const lineH = fs * 1.05;
+  gx.font = `${fs}px ${SIGN_FONT}`;
+  const ranges = [];                                                        // letter centres {c, r}, in cells
+  SIGN_LINES.forEach((line, li) => {
+    const total = gx.measureText(line).width, x0 = (RW - total) / 2, yPx = rowOf(SIGN_Y) * RS + li * lineH;
+    for (let k = 0; k < line.length; k++) {
+      const a = x0 + gx.measureText(line.slice(0, k)).width, b = x0 + gx.measureText(line.slice(0, k + 1)).width;
+      gx.fillText(line[k], a, yPx);
+      ranges.push({ c: (a + b) / 2 / S, r: yPx / RS });
+    }
+  });
+  signR0 = Math.max(0, Math.floor(rowOf(SIGN_Y) - fs / RS));
+  signR1 = Math.min(ROWS, Math.ceil(rowOf(SIGN_Y) + (lineH * (SIGN_LINES.length - 1) + fs) / RS));
+  const d = gx.getImageData(0, 0, RW, RH).data, cell = S * RS;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    let a = 0;
+    for (let y = r * RS; y < (r + 1) * RS; y++) for (let x = c * S; x < (c + 1) * S; x++) a += d[(y * RW + x) * 4 + 3];
+    const i = r * COLS + c;
+    sCov[i] = a / 255 / cell;
+    let best = 0, bd = 1e9;                                                 // nearest letter
+    ranges.forEach((m, k) => { const dd = (c - m.c) ** 2 + (2 * (r - m.r)) ** 2; if (dd < bd) { bd = dd; best = k; } });
+    sLetter[i] = best;
+  }
+  // neon halo: blur the letters a few cells outwards
+  const tmp = new Float32Array(N), RX = 4, RY = 2;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    let s = 0; for (let k = -RX; k <= RX; k++) { const cc = c + k; if (cc >= 0 && cc < COLS) s += sCov[r * COLS + cc]; }
+    tmp[r * COLS + c] = s / (2 * RX + 1);
+  }
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    let s = 0; for (let k = -RY; k <= RY; k++) { const rr = r + k; if (rr >= 0 && rr < ROWS) s += tmp[rr * COLS + c]; }
+    sHalo[r * COLS + c] = s / (2 * RY + 1);
+  }
+}
+
+function letterBright(k, t) {
+  const tOn = 0.6 + k * 0.12;                                               // letters switch on one by one
+  if (t < tOn) return 0;
+  if (t < tOn + 0.4) return hash3(k, Math.floor(t * 22), 5) % 3 ? 1 : 0.12;
+  if (k === BROKEN) {
+    const ph = (t + 2) % 6.5;
+    if (ph < 0.7) return hash3(k, Math.floor(t * 16), 6) % 2 ? 1 : 0.2;
+  }
+  return 0.96 + 0.04 * Math.sin(t * 7 + k);
+}
+
+function drawSign(t) {
+  for (let i = signR0 * COLS; i < signR1 * COLS; i++) {
+    const cov = sCov[i], halo = sHalo[i];
+    if (cov < 0.04 && halo < 0.05) continue;
+    const k = sLetter[i], b = letterBright(k, t);
+    if (b <= 0) continue;
+    const base = k < SIGN.indexOf(".") ? AMBER : k === SIGN.indexOf(".") ? DOT : PINK;
+    if (cov >= 0.04) {
+      const core = Math.pow(cov, 0.7), col = mix3(base, CORE, 0.3 * cov * cov);
+      set(i, clamp((0.35 + 0.65 * core) * b), col[0], col[1], col[2]);
+    } else {
+      const l = 0.3 * halo * b;
+      if (l > lum[i]) set(i, l, base[0] * 0.85, base[1] * 0.6, base[2] * 0.6);
+    }
+  }
+}
+
+// ================================================================ scene
+function scene(t) {
+  const fadeIn = smoothstep(0, 1.2, t);
+  for (let i = 0; i < N; i++) { lum[i] = haloLum[i]; const j = i * 3; rgb[j] = 1; rgb[j + 1] = 0.45; rgb[j + 2] = 0.15; }
+  drawEmbers(t);
+  drawSkewer();
+  drawTray();
+  drawSword(t);                                           // before the meat: its tip goes behind the döner
+  drawMeat(t);
+  drawTomato(t);
+  drawShavings(t);
+  drawDrips(t);
+  drawSteam(t);
+  if (fadeIn < 1) for (let i = 0; i < N; i++) lum[i] *= fadeIn;
+  drawSign(t);
+}
+
+// ================================================================ letters -> pixels
+const RAMP = [" ", ".'`", ":-~,", "=+!/\\|()<>", "tfjrxnuvczil?", "XYUJCLQ0OZmwqpdbkhao", "#MW&8%B", "@$"];
+const LEVELS = [0.06, 0.15, 0.30, 0.45, 0.60, 0.75, 0.90];
+const view = document.getElementById("view"), ctx = view.getContext("2d");
+const W = COLS * CW, H = ROWS * CH;
+view.width = W; view.height = H;
+const START = [], COUNT = RAMP.map((s) => s.length);
+RAMP.reduce((s, b, k) => { START[k] = s; return s + b.length; }, 0);
+const MASKS = [...RAMP.join("")].map((ch) => {            // each character pre-drawn once, as an alpha mask
+  const g = document.createElement("canvas"); g.width = CW; g.height = CH;
+  const gx = g.getContext("2d");
+  gx.font = FONT; gx.textBaseline = "top"; gx.fillStyle = "#fff"; gx.fillText(ch, 0, 0);
+  const d = gx.getImageData(0, 0, CW, CH).data, m = new Uint8Array(CW * CH);
+  for (let k = 0; k < m.length; k++) m[k] = d[k * 4 + 3];
+  return m;
+});
+const ascii = document.createElement("canvas"); ascii.width = W; ascii.height = H;
+const actx = ascii.getContext("2d");
+const img = actx.createImageData(W, H), px32 = new Uint32Array(img.data.buffer);
+const glows = [2, 4, 8].map((s) => { const g = document.createElement("canvas"); g.width = Math.ceil(W / s); g.height = Math.ceil(H / s); return g; });
+
+function draw(frame) {
+  px32.fill(0);
+  const fidx = Math.floor(frame / 3);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const i = r * COLS + c, L = lum[i];
+    let level = 0;
+    while (level < LEVELS.length && L >= LEVELS[level]) level++;
+    if (level === 0) continue;
+    const m = MASKS[START[level] + hash3(r, c, fidx) % COUNT[level]];
+    const k = (0.45 + 0.75 * L) * 1.5 * 255, j = i * 3;
+    const pr = Math.min(255, rgb[j] * k) | 0, pg = Math.min(255, rgb[j + 1] * k) | 0, pb = Math.min(255, rgb[j + 2] * k) | 0;
+    const rgb24 = (pb << 16) | (pg << 8) | pr;
+    let o = r * CH * W + c * CW, mi = 0;
+    for (let y = 0; y < CH; y++, o += W) for (let x = 0; x < CW; x++, mi++) {
+      const v = m[mi];
+      if (v) px32[o + x] = (v << 24) | rgb24;
+    }
+  }
+  actx.putImageData(img, 0, 0);
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(ascii, 0, 0);
+  let src = ascii;                                         // glow: shrink the picture, then lay it back on top
+  for (const g of glows) {
+    const gx = g.getContext("2d");
+    gx.imageSmoothingEnabled = true; gx.clearRect(0, 0, g.width, g.height);
+    gx.drawImage(src, 0, 0, g.width, g.height); src = g;
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter"; ctx.globalAlpha = 0.75; ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(glows[2], 0, 0, W, H);
+  ctx.restore();
+}
+
+// ================================================================ play
+let t0 = 0, lastDraw = -1e9;
+function tick(now) {
+  if (now - lastDraw >= 1000 / FPS - 2) {
+    lastDraw = now;
+    const t = (now - t0) / 1000;
+    scene(t);
+    draw(Math.floor(t * FPS));
+  }
+  requestAnimationFrame(tick);
+}
+const fontReady = document.fonts ? document.fonts.load("100px Bungee") : Promise.resolve();
+Promise.race([fontReady, new Promise((ok) => setTimeout(ok, 2500))]).catch(() => {}).then(() => {
+  buildSign();
+  t0 = performance.now();
+  requestAnimationFrame(tick);
+});
+
+let resizeTimer = 0;                                      // big change in window shape -> rebuild the grid
+addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (Math.abs(innerWidth / Math.max(1, innerHeight) - ASPECT) / ASPECT > 0.08) location.reload();
+  }, 400);
+});
+</script>
+</body>
+</html>
