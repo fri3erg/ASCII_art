@@ -1,4 +1,8 @@
 .vercel
+# personal photos stay out of git, originals and the resized copies used by the pages alike
+WhatsApp*
+projects/**/*.jpg
+projects/**/*.jpeg
 node_modules
 .DS_Store
 Thumbs.db
