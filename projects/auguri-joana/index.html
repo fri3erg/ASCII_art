@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auguri Joana</title>
+<meta name="description" content="un pastel de nata per te (e niente pasta col pollo)">
+<meta property="og:title" content="Auguri Joana">
+<meta property="og:description" content="un pastel de nata per te (e niente pasta col pollo)">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎂</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Pacifico&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block;
+    object-fit: contain; background: #000; }
+</style>
+</head>
+<body>
+<canvas id="view" aria-label="Auguri Joana: a pastel de nata turning in front of a waving Portuguese flag, next to a plate of pasta with chicken crossed out in red"></canvas>
+
+<script>
+"use strict";
+// ================================================================ settings: edit these
+const FONTS_TO_WAIT_FOR = ["100px Pacifico"];
+
+// ================================================================ grid
+// The picture is drawn in "units": a row is 1 unit tall and a column is UNIT units wide, so units are
+// square. Everything lives in a SCENE_W x SCENE_H box that is centred and always fits the screen;
+// phones get more rows (a finer grid) instead of a cropped picture.
+const FONT_SIZE = 10, FPS = 30;
+const FONT = `${FONT_SIZE}px Menlo, Consolas, "DejaVu Sans Mono", "Courier New", monospace`;
+const probe = document.createElement("canvas").getContext("2d");
+probe.font = FONT;
+const CW = Math.max(1, Math.round(probe.measureText("M").width)), CH = Math.round(FONT_SIZE * 1.15);
+const UNIT = CW / CH;
+const ASPECT = innerWidth / Math.max(1, innerHeight), PORTRAIT = ASPECT < 1;
+const SCENE_W = 84, SCENE_H = 176;                    // made for phones: one tall, stacked picture everywhere
+const ROWS = Math.min(320, Math.ceil(Math.max(SCENE_H * 1.06, SCENE_W * 1.1 / ASPECT)));
+const COLS = Math.min(900, Math.max(60, Math.round(ROWS * ASPECT / UNIT)));
+const N = COLS * ROWS, Y_OFF = (ROWS - SCENE_H) / 2;
+const X = new Float32Array(COLS), Y = new Float32Array(ROWS);
+for (let c = 0; c < COLS; c++) X[c] = (c + 0.5 - COLS / 2) * UNIT;    // x = 0 is the centre
+for (let r = 0; r < ROWS; r++) Y[r] = r + 0.5 - Y_OFF;                // y = 0 is the top of the box
+const colOf = (x) => x / UNIT + COLS / 2, rowOf = (y) => y + Y_OFF;
+
+const lum = new Float32Array(N), rgb = new Float32Array(N * 3);       // brightness 0..1 and colour per cell
+function set(i, l, r, g, b) { lum[i] = l; const j = i * 3; rgb[j] = r; rgb[j + 1] = g; rgb[j + 2] = b; }
+function put(x, y, l, r, g, b, front = false) {                       // one cell at a scene point
+  const c = Math.floor(colOf(x)), rr = Math.floor(rowOf(y));
+  if (c < 0 || c >= COLS || rr < 0 || rr >= ROWS) return;
+  const i = rr * COLS + c;
+  if (front || l > lum[i]) set(i, l, r, g, b);
+}
+
+// ================================================================ maths
+const TAU = Math.PI * 2;
+const clamp = (x, lo = 0, hi = 1) => (x < lo ? lo : x > hi ? hi : x);
+function smoothstep(a, b, x) { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); }
+const mix = (a, b, k) => a + (b - a) * k;
+const mix3 = (a, b, k) => { k = clamp(k); return [mix(a[0], b[0], k), mix(a[1], b[1], k), mix(a[2], b[2], k)]; };
+function hash3(a, b, c) {
+  let h = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663) ^ Math.imul(c, 83492791)) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+const rnd = (a, b = 0, c = 0) => hash3(a, b, c + 7) / 4294967296;    // fixed pseudo-random 0..1
+const hv = (a, b, c) => hash3(a, b, c) / 2147483648 - 1;
+function vnoise(x, y, z) {                                            // smooth value noise, about -1..1
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  let u = x - xi, v = y - yi, w = z - zi;
+  u = u * u * (3 - 2 * u); v = v * v * (3 - 2 * v); w = w * w * (3 - 2 * w);
+  const a = mix(mix(hv(xi, yi, zi), hv(xi + 1, yi, zi), u), mix(hv(xi, yi + 1, zi), hv(xi + 1, yi + 1, zi), u), v);
+  const b = mix(mix(hv(xi, yi, zi + 1), hv(xi + 1, yi, zi + 1), u), mix(hv(xi, yi + 1, zi + 1), hv(xi + 1, yi + 1, zi + 1), u), v);
+  return mix(a, b, w);
+}
+
+// The renderer brightens colours up to ~1.8x, so any colour you hand it is rescaled to this
+// brightness first; otherwise saturated colours clip to white.
+const COLOR_GAIN = 0.58;
+const tame = (c) => { const m = Math.max(c[0], c[1], c[2], 1e-3); return c.map((v) => v * COLOR_GAIN / m); };
+
+// ================================================================ text -> cells
+// Rasterises lines of text into the grid. Returns per-cell coverage, colour and letter index, so a
+// scene can reveal, flicker or dissolve letters individually.
+function buildText(lines, { y, maxW = SCENE_W * 0.9, maxH = 20, gap = 1.15 }) {
+  const S = 4, RS = Math.max(1, Math.round(S / UNIT)), RW = COLS * S, RH = ROWS * RS, PXU = S / UNIT;
+  const g = document.createElement("canvas"); g.width = RW; g.height = RH;
+  const gx = g.getContext("2d", { willReadFrequently: true });
+  gx.textBaseline = "middle";
+  const EMOJI = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+  const parts = (s) => s.split(/(\p{Extended_Pictographic}+)/u).filter(Boolean)
+    .map((p) => ({ p, emoji: /\p{Extended_Pictographic}/u.test(p) }));
+  const fontOf = (q, l, fs) => `${q.emoji ? fs * 0.92 : fs}px ${q.emoji ? EMOJI : l.font}`;
+  const width = (l, fs) => parts(l.text).reduce((w, q) => { gx.font = fontOf(q, l, fs); return w + gx.measureText(q.p).width; }, 0);
+  const w100 = Math.max(...lines.map((l) => width(l, 100)));
+  const fs = Math.min(100 * Math.min(maxW, COLS * UNIT * 0.92) * PXU / w100, maxH * PXU);
+  const lineH = fs * gap, centres = [];
+  lines.forEach((l, li) => {
+    let x = (RW - width(l, fs)) / 2;
+    const yPx = rowOf(y) * RS + (li - (lines.length - 1) / 2) * lineH;
+    for (const q of parts(l.text)) for (const ch of q.emoji ? [q.p] : [...q.p]) {
+      gx.font = fontOf(q, l, fs);
+      const w = gx.measureText(ch).width;
+      gx.fillStyle = q.emoji ? "#ffd36b" : `rgb(${(l.color || [1, 1, 1]).map((v) => v * 255).join(",")})`;
+      gx.fillText(ch, x, yPx);
+      if (ch.trim()) centres.push({ c: (x + w / 2) / S, r: yPx / RS });
+      x += w;
+    }
+  });
+  const d = gx.getImageData(0, 0, RW, RH).data, cell = S * RS;
+  const T = { cov: new Float32Array(N), col: new Float32Array(N * 3), letter: new Int16Array(N).fill(-1), count: centres.length };
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    let a = 0, R = 0, G = 0, B = 0;
+    for (let yy = r * RS; yy < (r + 1) * RS; yy++) for (let xx = c * S; xx < (c + 1) * S; xx++) {
+      const o = (yy * RW + xx) * 4, al = d[o + 3] / 255;
+      a += al; R += d[o] * al; G += d[o + 1] * al; B += d[o + 2] * al;
+    }
+    if (a < 1e-3) continue;
+    const i = r * COLS + c, k = tame([R / a / 255, G / a / 255, B / a / 255]);
+    T.cov[i] = a / cell; T.col.set(k, i * 3);
+    let best = -1, bd = 1e9;                                             // nearest letter
+    centres.forEach((m, n) => { const dd = (c - m.c) ** 2 + (2 * (r - m.r)) ** 2; if (dd < bd) { bd = dd; best = n; } });
+    T.letter[i] = best;
+  }
+  return T;
+}
+
+// ================================================================ layout
+// Made for a phone held upright: the words on two lines at the top, the nata big in the middle and the
+// crossed-out pasta below. Wider screens show the same stacked picture in the middle, with the flag
+// filling the rest.
+const GREETING = ["Auguri", "Joana"].map((text) => ({ text, font: "Pacifico, cursive", color: [1, 0.7, 0.3] }));
+const LAYOUT = { text: { y: 24, maxW: 80, maxH: 21 }, nata: { x: 0, y: 84, R: 30 }, plate: { x: 0, y: 158, R: 24 } };
+const GOLD_TXT = tame([1, 0.68, 0.22]), ROSE_TXT = tame([1, 0.45, 0.42]);
+const FIRST_WORD = 6;                                                 // letters of "Auguri"
+
+// ================================================================ the flag (static layer, sampled with a wave)
+const FX0 = X[0] - UNIT / 2, FX1 = X[COLS - 1] + UNIT / 2, FY0 = Y[0] - 0.5, FY1 = Y[ROWS - 1] + 0.5;
+const SPLIT = FX0 + 0.4 * (FX1 - FX0);
+// the emblem sits on the colour split; on a tall phone screen it goes in the gap between the nata and the plate
+// instead of the exact middle, where the nata would hide it
+const FMID = PORTRAIT ? (LAYOUT.nata.y + LAYOUT.plate.y) / 2 + 6 : (FY0 + FY1) / 2;
+const SR = Math.min(0.23 * (FY1 - FY0), 0.21 * (FX1 - FX0));          // armillary sphere radius
+const F_GREEN = tame([0.05, 0.6, 0.22]), F_RED = tame([0.85, 0.07, 0.07]), F_GOLD = tame([1, 0.82, 0.18]);
+const F_WHITE = [0.5, 0.5, 0.52], F_BLUE = tame([0.15, 0.3, 0.95]);
+const flagL = new Float32Array(N), flagC = new Float32Array(N * 3), dim = new Float32Array(N).fill(1);
+
+function buildFlag() {
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const i = r * COLS + c, x = X[c], y = Y[r];
+    let col = x < SPLIT ? F_GREEN : F_RED, l = 0.2;
+    if (hash3(c, r, 3) % 100 < 22) l *= 0.55;                         // a little cloth texture
+    const dx = (x - SPLIT) / SR, dy = (y - FMID) / SR, rho = Math.hypot(dx, dy);
+    const th = 0.8 / SR;                                              // band half-thickness, in radii (0.8 units)
+    const ell = (a, b, oy = 0) => Math.abs(Math.hypot(dx / a, (dy - oy) / b) - 1) * Math.min(a, b);
+    let gold = false;
+    if (Math.abs(rho - 1) < th * 1.5) gold = true;                    // outer ring
+    if (rho < 1) {
+      if (ell(1, 0.28) < th) gold = true;                             // equator
+      if (ell(0.92, 0.22, -0.55) < th * 0.8 || ell(0.92, 0.22, 0.55) < th * 0.8) gold = true;   // tropics
+      if (ell(0.38, 1) < th) gold = true;                             // meridian
+      const ca = Math.cos(-0.45), sa = Math.sin(-0.45), ex = dx * ca - dy * sa, ey = dx * sa + dy * ca;
+      const ed = Math.abs(Math.hypot(ex / 0.95, ey / 0.32) - 1) * 0.32;
+      if (ed < th * 1.4 && ed > th * 0.3 || Math.abs(Math.hypot(ex / 0.95, ey / 0.2) - 1) * 0.2 < th * 0.7) gold = true;   // ecliptic band
+    }
+    if (gold) { col = F_GOLD; l = 0.34; }
+    // the shield: red border with little gold castles, white inside with five blue quinas
+    const sw = 0.4, sh = 0.46, sy0 = -sh, sy1 = sh - sw;
+    const inShield = (px, py, w) => Math.abs(px) < w && py > sy0 + (sw - w) && (py < sy1 || px * px + (py - sy1) ** 2 < w * w);
+    if (inShield(dx, dy, sw)) {
+      if (inShield(dx, dy, sw * 0.68)) {
+        col = F_WHITE; l = 0.3;
+        for (const [qx, qy] of [[0, -0.18], [0, 0.04], [0, 0.26], [-0.15, 0.04], [0.15, 0.04]])
+          if (Math.hypot(dx - qx, (dy - qy) * 0.8) < 0.075) { col = F_BLUE; l = 0.34; }
+      } else {
+        col = F_RED; l = 0.36;
+        if ((hash3(Math.floor((dx + 2) * 9), Math.floor((dy + 2) * 6), 5) & 3) === 0) { col = F_GOLD; l = 0.36; }
+      }
+    }
+    flagL[i] = l; flagC.set(col, i * 3);
+  }
+}
+
+// a darker zone behind the words and the objects, so they read in front of the flag
+function buildDim(textCov) {
+  const blur = boxBlur(boxBlur(textCov, 5, 2), 5, 2);
+  const N_ = LAYOUT.nata, P_ = LAYOUT.plate;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const i = r * COLS + c, x = X[c], y = Y[r];
+    let k = 1 - 0.8 * clamp(blur[i] * 2.2);
+    const dn = ((x - N_.x) / (N_.R * 1.35)) ** 2 + ((y - N_.y - 2) / (N_.R * 0.75)) ** 2;
+    k *= 1 - 0.6 * Math.exp(-dn * dn * 2);
+    const ds = ((x - N_.x) / (N_.R * 0.9)) ** 2 + ((y - N_.y + 18) / 14) ** 2;  // room for the steam
+    k *= 1 - 0.4 * Math.exp(-ds * 2);
+    const dp = ((x - P_.x) / (P_.R * 1.45)) ** 2 + ((y - P_.y) / (P_.R * 0.95)) ** 2;
+    k *= 1 - 0.7 * Math.exp(-dp * dp * 1.2);
+    dim[i] = k;
+  }
+}
+function boxBlur(src, rx, ry) {
+  const tmp = new Float32Array(N), out = new Float32Array(N);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    let s = 0, n = 0;
+    for (let k = -rx; k <= rx; k++) { const cc = c + k; if (cc >= 0 && cc < COLS) { s += src[r * COLS + cc]; n++; } }
+    tmp[r * COLS + c] = s / n;
+  }
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    let s = 0, n = 0;
+    for (let k = -ry; k <= ry; k++) { const rr = r + k; if (rr >= 0 && rr < ROWS) { s += tmp[rr * COLS + c]; n++; } }
+    out[r * COLS + c] = s / n;
+  }
+  return out;
+}
+
+// per-column and per-row parts of the wave phase, so the per-cell work is a few multiplications
+const colA = new Float32Array(COLS), colAmp = new Float32Array(COLS), colFrac = new Float32Array(COLS), rowB = new Float32Array(ROWS);
+for (let c = 0; c < COLS; c++) { colFrac[c] = (X[c] - FX0) / (FX1 - FX0); colA[c] = X[c] * 0.075; colAmp[c] = 0.2 + 0.8 * colFrac[c]; }
+for (let r = 0; r < ROWS; r++) rowB[r] = Y[r] * 0.035;
+const sinA = new Float32Array(COLS), cosA = new Float32Array(COLS);
+
+function drawFlag(t) {
+  const fade = smoothstep(0, 1.4, t), w = -2.0 * t;
+  for (let c = 0; c < COLS; c++) { sinA[c] = Math.sin(colA[c] + w); cosA[c] = Math.cos(colA[c] + w); }
+  for (let r = 0; r < ROWS; r++) {
+    const sb = Math.sin(rowB[r]), cb = Math.cos(rowB[r]);
+    for (let c = 0; c < COLS; c++) {
+      const i = r * COLS + c;
+      const unfurl = smoothstep(0, 0.35, t * 0.9 - colFrac[c] * 0.6);   // the flag opens out from the hoist
+      if (unfurl <= 0) { lum[i] = 0; continue; }
+      const s = sinA[c] * cb + cosA[c] * sb, co = cosA[c] * cb - sinA[c] * sb, amp = colAmp[c];
+      let rr = r + Math.round(2.4 * amp * co);                         // ripples bend the cloth up and down
+      rr = rr < 0 ? 0 : rr >= ROWS ? ROWS - 1 : rr;
+      const j = rr * COLS + c;
+      const shade = 1 + 0.45 * amp * s;                                 // light and dark folds travelling across
+      set(i, flagL[j] * shade * dim[i] * fade * unfurl, flagC[j * 3], flagC[j * 3 + 1], flagC[j * 3 + 2]);
+    }
+  }
+}
+
+// ================================================================ the words
+let TEXT = null, HALO = null, LETTER_C = [];
+function drawWords(t) {
+  const start = 0.5, per = 0.2, haloOn = smoothstep(start + 2.2, start + 3, t);
+  for (let i = 0; i < N; i++) {
+    const cov = TEXT.cov[i], k = TEXT.letter[i];
+    if (cov >= 0.04 && k >= 0) {
+      const r = (i / COLS) | 0, c = i - r * COLS;
+      const lc = LETTER_C[k], u = (c - lc[0]) / Math.max(1, lc[1] - lc[0]);
+      const tw = start + k * per + u * per * 1.4;                     // each letter writes itself left to right
+      const appear = smoothstep(tw, tw + 0.12, t);
+      if (appear > 0) {
+        const base = k < FIRST_WORD ? GOLD_TXT : ROSE_TXT;
+        let l = clamp(Math.pow(cov, 0.7) * 1.05) * (0.86 + 0.14 * Math.sin(t * 2.6 + c * 0.12 - r * 0.3)) * appear;
+        let col = base;
+        const pen = appear < 1 ? 1 - Math.abs(appear * 2 - 1) : 0;    // a bright nib where it is writing
+        if (pen > 0) { col = mix3(base, [0.62, 0.58, 0.45], pen); l = Math.max(l, 0.95 * pen); }
+        if (l > lum[i]) set(i, clamp(l), col[0], col[1], col[2]);
+        continue;
+      }
+    }
+    const hl = 0.3 * HALO[i] * haloOn;                                 // warm neon halo round the letters
+    if (hl > 0.05 && hl > lum[i]) set(i, hl, 0.45, 0.22, 0.08);
+  }
+}
+
+// ================================================================ the pastel de nata
+const LIGHT = (() => { const v = [-0.5, 0.55, 0.75], m = Math.hypot(...v); return v.map((q) => q / m); })();
+const EL = 0.62, CE = Math.cos(EL), SE = Math.sin(EL);                  // we look down on it a little
+const PASTRY = tame([1, 0.66, 0.24]), PASTRY_DK = tame([0.8, 0.4, 0.12]), BURNT = [0.3, 0.13, 0.04];
+const CUSTARD = tame([1, 0.86, 0.3]), CARAMEL = tame([0.8, 0.42, 0.1]), CHAR = [0.22, 0.09, 0.03];
+const CINNAMON = [0.4, 0.17, 0.06];
+const around = (a, y, f, fy, seed) => vnoise(Math.cos(a) * f + seed * 5.3, Math.sin(a) * f + seed * 2.1, y * fy);
+
+function nataState(t) {
+  const k = smoothstep(0.9, 2.4, t);
+  const s = 0.55 + 0.45 * k + 0.08 * Math.sin(Math.PI * k);
+  return {
+    k, fade: smoothstep(0.9, 1.4, t),
+    x: LAYOUT.nata.x, y: LAYOUT.nata.y + (1 - k) * 26 + 0.5 * Math.sin(t * 1.3),
+    R: LAYOUT.nata.R * s, spin: 0.4 * t - 3 * (1 - k) * (1 - k),
+  };
+}
+
+function drawNata(t) {
+  const S = nataState(t);
+  if (S.k <= 0) return;
+  const Rt = S.R, Rb = Rt * 0.76, H = Rt * 0.5, spin = S.spin, cx = S.x, cy = S.y;
+  const rAt = (h) => {                                                  // radius at depth h below the rim
+    const v = h / H;
+    return mix(Rt, Rb, Math.pow(v, 1.15)) * (0.9 + 0.1 * Math.sqrt(clamp((H - h) / (H * 0.18))));
+  };
+  const slope = Math.atan((Rt - Rb) / H), cs = Math.cos(slope), ss = Math.sin(slope);
+  // --- the outside of the pastry cup: front half only, column by column
+  const c0 = Math.max(0, Math.floor(colOf(cx - Rt))), c1 = Math.min(COLS - 1, Math.ceil(colOf(cx + Rt)));
+  for (let c = c0; c <= c1; c++) {
+    const xx = X[c] - cx;
+    for (let h = 0; h <= H; h += 0.2) {
+      const r = rAt(h);
+      if (Math.abs(xx) >= r) continue;
+      const z = Math.sqrt(r * r - xx * xx), row = Math.floor(rowOf(cy + h * CE + z * SE));
+      if (row < 0 || row >= ROWS) continue;
+      const th = Math.asin(xx / r), a = th + spin;
+      const nx = Math.sin(th) * cs, ny = -ss, nz = Math.cos(th) * cs;
+      const diff = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+      const n1 = around(a, h, 2.5, 0.25, 1), n2 = around(a, h, 7, 0.6, 2);
+      const layer = Math.sin(h * 2.3 + a * 2 + 2.2 * n1 + 1.2 * n2);     // the spiral layers of the pastry
+      const groove = smoothstep(0.55, 0.95, layer), ridge = smoothstep(-0.2, -0.9, layer);
+      let col = mix3(PASTRY, PASTRY_DK, 0.45 + 0.6 * n1 + 0.4 * n2 - 0.3 * ridge);
+      col = mix3(col, BURNT, smoothstep(0.65, 1, n2 + 0.5 * n1) * 0.7 + smoothstep(H * 0.75, H, h) * 0.3);
+      let l = (0.36 + 0.5 * diff) * (1 - 0.45 * groove) + 0.08 * ridge;
+      if (hash3(Math.floor(a * 30 + 999), Math.floor(h * 2), 4) % 100 < 6) { l += 0.2 * diff; col = mix3(col, [0.62, 0.55, 0.38], 0.5); }
+      set(row * COLS + c, clamp(l * S.fade), col[0], col[1], col[2]);
+    }
+  }
+  // --- the top: custard in the middle, the flaky rim around it
+  const Rc = Rt * 0.76;
+  const r0 = Math.max(0, Math.floor(rowOf(cy - Rt * SE - 1))), r1 = Math.min(ROWS - 1, Math.ceil(rowOf(cy + Rt * SE + 1)));
+  for (let r = r0; r <= r1; r++) {
+    const zz = (Y[r] - cy) / SE;
+    for (let c = c0; c <= c1; c++) {
+      const xx = X[c] - cx, rho = Math.hypot(xx, zz);
+      if (rho > Rt * 1.02) continue;
+      const a = Math.atan2(xx, zz) + spin;
+      const outer = Rt * (0.97 + 0.03 * Math.sin(a * 13) + 0.02 * around(a, 0, 3, 0, 5));   // fluted, a bit uneven
+      if (rho > outer) continue;
+      const i = r * COLS + c;
+      const rc = Rc * (1 + 0.025 * Math.sin(a * 6 + 1) + 0.02 * around(a, 0, 2, 0, 6));
+      const px = rho * Math.cos(a), pz = rho * Math.sin(a);                // turning with the tart
+      let l, col;
+      if (rho < rc) {
+        // custard: a low dome, glossy, with dark scorched blisters
+        const q = rho / rc, gx = 0.4 * xx / rc, gz = 0.4 * zz / rc;   // a gentle dome
+        const b1 = vnoise(px * 0.5, pz * 0.5, 11);
+        const nl = Math.hypot(gx + 0.3 * b1, 1, gz);
+        const diff = Math.max(0, ((gx + 0.3 * b1) * LIGHT[0] + LIGHT[1] + gz * LIGHT[2]) / nl);
+        const s1 = vnoise(px * 0.13, pz * 0.13, 3), s2 = vnoise(px * 0.3, pz * 0.3, 7), s3 = vnoise(px * 0.7, pz * 0.7, 9);
+        const scorch = s1 * 0.6 + s2 * 0.55 + s3 * 0.2 + 0.2 * smoothstep(0.8, 1, q);
+        col = CUSTARD; l = 0.84 + 0.18 * diff;
+        if (scorch > 0.34) { const k = smoothstep(0.34, 0.5, scorch); col = mix3(col, CARAMEL, k); l -= 0.05 * k; }
+        if (scorch > 0.52) { const k = smoothstep(0.52, 0.68, scorch); col = mix3(col, CHAR, k); l = mix(l, 0.42, k); }
+        const gloss = Math.pow(diff, 10) * (1 - smoothstep(0.3, 0.6, scorch));
+        if (gloss > 0.2) { col = mix3(col, [0.62, 0.6, 0.48], gloss * 0.7); l += gloss * 0.15; }
+        if (hash3(Math.floor(px * 1.4 + 500), Math.floor(pz * 1.4 + 500), 31) % 100 < 3) { col = CINNAMON; l = 0.5; }
+        l *= 1 - 0.35 * smoothstep(0.86, 1, q) * (zz < 0 ? 1 : 0.4);    // shadow under the back rim
+      } else {
+        // pastry rim: rounded, flaky, darker at the very edge
+        const u = (rho - rc) / Math.max(0.5, outer - rc);
+        const tilt = (u - 0.35) * 1.4, ux = xx / Math.max(1e-3, rho), uz = zz / Math.max(1e-3, rho);
+        const nx = ux * Math.sin(tilt), ny = Math.cos(tilt), nz = uz * Math.sin(tilt);
+        const diff = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+        const f1 = around(a, u, 9, 2, 7), f2 = around(a, u, 22, 3, 8);
+        const flake = Math.sin(a * 40 + f1 * 6 + u * 3);
+        col = mix3(PASTRY, PASTRY_DK, 0.5 + 0.5 * f1 + 0.3 * u);
+        col = mix3(col, BURNT, smoothstep(0.35, 0.9, f2 + 0.6 * u - 0.2));
+        l = (0.4 + 0.45 * diff) * (1 - 0.3 * smoothstep(0.6, 1, flake)) * (1 - 0.3 * smoothstep(0.75, 1, u));
+        if (u < 0.14) { l = 0.32; col = mix3(PASTRY_DK, BURNT, 0.5); }        // the seam where custard meets crust
+      }
+      set(i, clamp(l * S.fade), col[0], col[1], col[2]);
+    }
+  }
+}
+
+function drawSteam(t) {                                                 // soft steam curling up off the custard
+  const S = nataState(t), on = smoothstep(2.2, 3.5, t);
+  if (on <= 0) return;
+  for (let k = 0; k < 12; k++) {
+    const life = 2.6 + rnd(k, 4) * 2, ph = t / life + rnd(k, 5), cyc = Math.floor(ph), u = ph - cyc;
+    const x0 = S.x + (rnd(k, cyc, 6) - 0.5) * S.R * 1.1;
+    const x = x0 + 3 * Math.sin(u * 5 + k) * u, y = S.y - 2 - u * 24;
+    const l = 0.3 * Math.sin(Math.PI * u) * on;
+    for (const [ox, oy] of [[0, 0], [UNIT, 0], [-UNIT, 0], [0, -1], [UNIT, -1]]) put(x + ox, y + oy, l, 0.55, 0.53, 0.5);
+  }
+}
+
+// ================================================================ the pasta with chicken (no thanks)
+const PLATE_TILT = 0.66;
+const WHITE = [0.48, 0.52, 0.58], PASTA = tame([1, 0.8, 0.2]), PASTA_DK = tame([0.85, 0.55, 0.12]);
+const MEAT = tame([1, 0.85, 0.62]), GRILL = tame([0.75, 0.38, 0.12]), GRILL_DK = [0.28, 0.12, 0.04];
+const XRED = tame([1, 0.07, 0.05]), XRED_DK = [0.36, 0.02, 0.02];
+const STRANDS = [], CHUNKS = [];
+function buildPasta() {                                                 // a tangle of strands, in plate radii
+  for (let s = 0; s < 18; s++) {
+    let x = (rnd(s, 1) - 0.5) * 0.8, z = (rnd(s, 2) - 0.5) * 0.8, ang = rnd(s, 3) * TAU, turn = (rnd(s, 4) - 0.5) * 0.5;
+    const pts = [], len = 50 + Math.floor(rnd(s, 5) * 50);
+    for (let j = 0; j < len; j++) {
+      turn += (rnd(s, j, 6) - 0.5) * 0.12; turn = clamp(turn, -0.3, 0.3);
+      ang += turn;
+      x += Math.cos(ang) * 0.025; z += Math.sin(ang) * 0.025;
+      const rr = Math.hypot(x, z);
+      if (rr > 0.64) { ang = Math.atan2(-z, -x) + (rnd(s, j, 7) - 0.5); x *= 0.64 / rr; z *= 0.64 / rr; }
+      pts.push(x, z);
+    }
+    STRANDS.push({ pts, ph: rnd(s, 8) * TAU });
+  }
+  for (let k = 0; k < 5; k++) {
+    const a = k / 5 * TAU + rnd(k, 11) * 0.8, d = 0.12 + rnd(k, 12) * 0.3;
+    CHUNKS.push({ x: Math.cos(a) * d, z: Math.sin(a) * d, rot: rnd(k, 13) * Math.PI, w: 0.2 + rnd(k, 14) * 0.05, h: 0.15 + rnd(k, 15) * 0.04, seed: k });
+  }
+}
+const mound = (x, z) => Math.max(0, 1 - (x * x + z * z) / 0.46);       // the pasta heaps up in the middle
+
+function plateState(t) {
+  const k = smoothstep(2.0, 2.6, t);
+  let shake = 0;
+  for (const ts of [X_T1 + X_DUR, X_T2 + X_DUR]) if (t > ts) shake += 1.4 * Math.sin((t - ts) * 55) * Math.exp(-(t - ts) * 7);
+  const pu = pulse(t);
+  shake += 0.7 * Math.sin(t * 60) * pu;
+  return { k, x: LAYOUT.plate.x + shake, y: LAYOUT.plate.y, R: LAYOUT.plate.R * (0.5 + 0.5 * k + 0.1 * Math.sin(Math.PI * k)) };
+}
+const X_T1 = 3.0, X_T2 = 3.45, X_DUR = 0.24;
+function pulse(t) {                                                     // every 6 s the X throbs once
+  if (t < 7) return 0;
+  const p = (t - 7) % 6;
+  return p < 0.7 ? Math.sin(Math.PI * p / 0.7) : 0;
+}
+
+function drawPlate(t) {
+  const P = plateState(t);
+  if (P.k <= 0) return;
+  const R = P.R, sp = PLATE_TILT, fade = P.k;
+  const r0 = Math.max(0, Math.floor(rowOf(P.y - R * sp - 1))), r1 = Math.min(ROWS - 1, Math.ceil(rowOf(P.y + R * sp + 2)));
+  const c0 = Math.max(0, Math.floor(colOf(P.x - R - 1))), c1 = Math.min(COLS - 1, Math.ceil(colOf(P.x + R + 1)));
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+    const dx = (X[c] - P.x) / R, dz = (Y[r] - P.y) / (R * sp), rho = Math.hypot(dx, dz);
+    const i = r * COLS + c;
+    if (rho > 1) {                                                      // the plate's edge, seen below the front rim
+      const rho2 = Math.hypot(dx, (Y[r] - P.y - 1.4) / (R * sp));
+      if (rho2 < 1 && dz > 0) set(i, 0.32 * fade, 0.42, 0.42, 0.45);
+      continue;
+    }
+    let l;
+    if (rho > 0.8) l = 0.5 + 0.15 * clamp(-(dx + dz) * 0.8, -1, 1);    // rim, lit from the upper left
+    else if (rho > 0.7) l = 0.3 + 0.08 * (dz > 0 ? 0 : 1);              // the step down into the well
+    else l = 0.36 + 0.06 * clamp(-(dx + dz), -1, 1);
+    if (Math.abs(rho - 0.9) < 0.02) l -= 0.1;                          // a fine line round the rim
+    set(i, l * fade, WHITE[0], WHITE[1], WHITE[2]);
+    if (rho < 0.67) {                                                   // the shadowy body of the heap, under the strands
+      const m = mound(dx, dz);
+      set(i, (0.4 + 0.12 * m) * fade, PASTA_DK[0], PASTA_DK[1], PASTA_DK[2]);
+    }
+  }
+  // the strands: lifted by the heap, so the middle stands up off the plate
+  const lift = (x, z) => mound(x, z) * R * 0.1;
+  for (const S of STRANDS) {
+    const p = S.pts;
+    for (let j = 0; j < p.length; j += 2) {
+      const x = p[j], z = p[j + 1];
+      const sx = P.x + x * R, sy = P.y + z * R * sp - lift(x, z);
+      const l = (0.8 + 0.15 * Math.sin(j * 0.13 + S.ph) + 0.08 * mound(x, z)) * fade;
+      const col = l > 0.82 ? PASTA : mix3(PASTA_DK, PASTA, 0.6);
+      put(sx, sy, l, col[0], col[1], col[2], true);
+      put(sx + UNIT, sy, l * 0.9, col[0], col[1], col[2], true);
+    }
+  }
+  // the chicken: chunky bits with browned, grill-marked edges
+  for (const K of CHUNKS) {
+    const cxs = P.x + K.x * R, cys = P.y + K.z * R * sp - lift(K.x, K.z) - 0.6;
+    const a = K.w * R, b = K.h * R * 0.75, ca = Math.cos(K.rot), sa = Math.sin(K.rot);
+    for (let r = Math.floor(rowOf(cys - b - 1)); r <= Math.ceil(rowOf(cys + b + 1)); r++) {
+      if (r < 0 || r >= ROWS) continue;
+      for (let c = Math.floor(colOf(cxs - a - 1)); c <= Math.ceil(colOf(cxs + a + 1)); c++) {
+        if (c < 0 || c >= COLS) continue;
+        const ex = X[c] - cxs, ey = Y[r] - cys;
+        const u = (ex * ca + ey * sa * 0.6) / a, v = (-ex * sa * 0.6 + ey * ca) / b;
+        const lumpy = 1 + 0.25 * vnoise(u * 2 + K.seed * 7, v * 2, K.seed);
+        const d = Math.hypot(u, v) / lumpy;
+        if (d > 1) continue;
+        let col = MEAT, l = 0.78 - 0.15 * v;
+        if (d > 0.6) { col = mix3(GRILL, GRILL_DK, smoothstep(0.75, 1, d)); l = 0.6 - 0.15 * smoothstep(0.8, 1, d); }
+        else if (Math.sin((u * 3 + v) * 5 + K.seed) > 0.75) { col = GRILL; l = 0.55; }   // grill marks
+        set(r * COLS + c, clamp(l * fade), col[0], col[1], col[2]);
+      }
+    }
+  }
+}
+
+function drawX(t) {                                                     // two strokes of red, then it stays
+  if (t < X_T1) return;
+  const P = plateState(t), R = LAYOUT.plate.R, ex = R * 1.0, ey = R * PLATE_TILT * 1.22, pu = pulse(t);
+  const strokes = [[-ex, -ey, ex, ey, X_T1], [ex, -ey, -ex, ey, X_T2]];
+  for (let s = 0; s < 2; s++) {
+    const [ax0, ay0, bx0, by0, ts] = strokes[s];
+    const prog = clamp((t - ts) / X_DUR);
+    if (prog <= 0) continue;
+    const ax = P.x + ax0, ay = P.y + ay0, bx = P.x + bx0, by = P.y + by0;
+    const dxs = bx - ax, dys = by - ay, L2 = dxs * dxs + dys * dys, Ls = Math.sqrt(L2);
+    const nxs = -dys / Ls, nys = dxs / Ls;
+    const W = 1.4 + 0.6 * pu;
+    const r0 = Math.max(0, Math.floor(rowOf(Math.min(ay, by) - W - 3))), r1 = Math.min(ROWS - 1, Math.ceil(rowOf(Math.max(ay, by) + W + 3)));
+    const c0 = Math.max(0, Math.floor(colOf(Math.min(ax, bx) - W - 3))), c1 = Math.min(COLS - 1, Math.ceil(colOf(Math.max(ax, bx) + W + 3)));
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      const px = X[c] - ax, py = Y[r] - ay;
+      const u = (px * dxs + py * dys) / L2;
+      if (u < 0 || u > prog) continue;
+      const bow = 1.6 * Math.sin(Math.PI * u) * (s ? -1 : 1);            // a hand-drawn curve
+      const d = Math.abs(px * nxs + py * nys - bow);
+      const hw = W * (0.35 + 0.65 * Math.pow(Math.sin(Math.PI * clamp(u * 1.05 + 0.02)), 0.4)) + 0.3 * hv(c, r, 17);
+      if (d > hw) continue;
+      const edge = d > hw - 0.7;
+      const col = edge ? XRED_DK : XRED;
+      set(r * COLS + c, clamp((edge ? 0.6 : 0.88) + 0.1 * pu), col[0], col[1], col[2]);
+    }
+  }
+}
+
+// ================================================================ confetti and sparkles
+const CONFETTI = [F_GREEN, F_RED, F_GOLD, tame([1, 0.55, 0.7]), [0.55, 0.55, 0.55]];
+function drawConfetti(t) {
+  const on = smoothstep(3.6, 4.5, t);
+  if (on <= 0) return;
+  for (let k = 0; k < 22; k++) {
+    const life = 5 + rnd(k, 1) * 4, ph = (t - 3.6) / life + rnd(k, 2), cyc = Math.floor(ph), u = ph - cyc;
+    if (cyc < 0 || (cyc === 0 && u < rnd(k, 2))) continue;              // nothing appears before it started falling
+    const x = FX0 + rnd(k, cyc, 3) * (FX1 - FX0) + 3 * Math.sin(t * 1.7 + k);
+    const y = FY0 - 2 + u * (FY1 - FY0 + 4);
+    const col = CONFETTI[Math.floor(rnd(k, cyc, 4) * CONFETTI.length)];
+    const flip = Math.abs(Math.sin(t * (3 + rnd(k, 5) * 4) + k));      // tumbling: wide, then edge-on
+    const l = (0.35 + 0.5 * flip) * on;
+    put(x, y, l, col[0], col[1], col[2]);
+    if (flip > 0.4) put(x + UNIT, y, l, col[0], col[1], col[2]);
+  }
+}
+function drawSparkles(t) {                                              // little stars twinkling round the nata and the words
+  const on = smoothstep(2.6, 3.4, t);
+  if (on <= 0) return;
+  const n = LAYOUT.nata, tx = LAYOUT.text;
+  for (let k = 0; k < 14; k++) {
+    const life = 1.1 + rnd(k, 1), ph = t / life + rnd(k, 2), cyc = Math.floor(ph), u = ph - cyc;
+    const nearText = k % 2 === 0;
+    const a = rnd(k, cyc, 3) * TAU, d = 0.9 + 0.5 * rnd(k, cyc, 4);
+    const x = nearText ? (rnd(k, cyc, 5) - 0.5) * tx.maxW * 1.05 : n.x + Math.cos(a) * n.R * 1.4 * d;
+    const y = nearText ? tx.y + (rnd(k, cyc, 6) - 0.5) * 52 : n.y + 4 + Math.sin(a) * n.R * 0.75 * d;
+    const l = Math.sin(Math.PI * u) * on;
+    put(x, y, 0.95 * l, 0.62, 0.55, 0.3);
+    for (const [ox, oy] of [[UNIT, 0], [-UNIT, 0], [0, 1], [0, -1]]) put(x + ox, y + oy, 0.45 * l, 0.6, 0.45, 0.15);
+  }
+}
+
+// ================================================================ setup and the frame
+async function setup() {                                              // runs once, after fonts are loaded
+  buildFlag();
+  buildPasta();
+  TEXT = buildText(GREETING, { y: LAYOUT.text.y, maxW: LAYOUT.text.maxW, maxH: LAYOUT.text.maxH, gap: 1.05 });
+  LETTER_C = Array.from({ length: TEXT.count }, () => [1e9, -1e9]);
+  for (let i = 0; i < N; i++) {
+    const k = TEXT.letter[i];
+    if (k < 0 || TEXT.cov[i] < 0.04) continue;
+    const c = i % COLS;
+    LETTER_C[k][0] = Math.min(LETTER_C[k][0], c); LETTER_C[k][1] = Math.max(LETTER_C[k][1], c);
+  }
+  const blur = boxBlur(boxBlur(TEXT.cov, 3, 1), 3, 1);
+  HALO = new Float32Array(N);
+  for (let i = 0; i < N; i++) if (TEXT.cov[i] < 0.04) HALO[i] = clamp(blur[i] * 1.6);
+  buildDim(TEXT.cov);
+}
+
+function scene(t) {
+  drawFlag(t);
+  drawConfetti(t);
+  drawSteam(t);
+  drawNata(t);
+  drawPlate(t);
+  drawX(t);
+  drawSparkles(t);
+  drawWords(t);
+}
+
+// ================================================================ cells -> pixels (no need to edit)
+const RAMP = [" ", ".'`", ":-~,", "=+!/\\|()<>", "tfjrxnuvczil?", "XYUJCLQ0OZmwqpdbkhao", "#MW&8%B", "@$"];
+const LEVELS = [0.06, 0.15, 0.30, 0.45, 0.60, 0.75, 0.90];
+const GLOW = 0.6;
+const view = document.getElementById("view"), ctx = view.getContext("2d");
+const W = COLS * CW, H = ROWS * CH;
+view.width = W; view.height = H;
+const START = [], COUNT = RAMP.map((s) => s.length);
+RAMP.reduce((s, b, k) => { START[k] = s; return s + b.length; }, 0);
+const MASKS = [...RAMP.join("")].map((ch) => {                        // each character pre-drawn as an alpha mask
+  const g = document.createElement("canvas"); g.width = CW; g.height = CH;
+  const gx = g.getContext("2d");
+  gx.font = FONT; gx.textBaseline = "top"; gx.fillStyle = "#fff"; gx.fillText(ch, 0, 0);
+  const d = gx.getImageData(0, 0, CW, CH).data, m = new Uint8Array(CW * CH);
+  for (let k = 0; k < m.length; k++) m[k] = d[k * 4 + 3];
+  return m;
+});
+const ascii = document.createElement("canvas"); ascii.width = W; ascii.height = H;
+const actx = ascii.getContext("2d");
+const img = actx.createImageData(W, H), px32 = new Uint32Array(img.data.buffer);
+const glows = [2, 4, 8].map((s) => { const g = document.createElement("canvas"); g.width = Math.ceil(W / s); g.height = Math.ceil(H / s); return g; });
+
+function draw(frame) {
+  px32.fill(0);
+  const fidx = Math.floor(frame / 3);                                 // characters reshuffle 10x a second
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const i = r * COLS + c, L = lum[i];
+    let level = 0;
+    while (level < LEVELS.length && L >= LEVELS[level]) level++;
+    if (level === 0) continue;
+    const m = MASKS[START[level] + hash3(r, c, fidx) % COUNT[level]];
+    const k = (0.45 + 0.75 * L) * 1.5 * 255, j = i * 3;
+    const pr = Math.min(255, rgb[j] * k) | 0, pg = Math.min(255, rgb[j + 1] * k) | 0, pb = Math.min(255, rgb[j + 2] * k) | 0;
+    const rgb24 = (pb << 16) | (pg << 8) | pr;
+    let o = r * CH * W + c * CW, mi = 0;
+    for (let yy = 0; yy < CH; yy++, o += W) for (let xx = 0; xx < CW; xx++, mi++) {
+      const v = m[mi];
+      if (v) px32[o + xx] = (v << 24) | rgb24;
+    }
+  }
+  actx.putImageData(img, 0, 0);
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(ascii, 0, 0);
+  if (GLOW > 0) {                                                     // glow: shrink, then lay back on top
+    let src = ascii;
+    for (const g of glows) {
+      const gx = g.getContext("2d");
+      gx.imageSmoothingEnabled = true; gx.clearRect(0, 0, g.width, g.height);
+      gx.drawImage(src, 0, 0, g.width, g.height); src = g;
+    }
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter"; ctx.globalAlpha = GLOW; ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(glows[2], 0, 0, W, H);
+    ctx.restore();
+  }
+}
+
+// ================================================================ play
+let t0 = 0, lastDraw = -1e9;
+const START_AT = Number(new URLSearchParams(location.search).get("t")) || 0;   // ?t=45 jumps ahead (for previews)
+function tick(now) {
+  if (now - lastDraw >= 1000 / FPS - 2) {
+    lastDraw = now;
+    const t = (now - t0) / 1000 + START_AT;
+    scene(t);
+    draw(Math.floor(t * FPS));
+  }
+  requestAnimationFrame(tick);
+}
+const fontsReady = document.fonts ? Promise.all(FONTS_TO_WAIT_FOR.map((f) => document.fonts.load(f))) : Promise.resolve();
+Promise.race([fontsReady, new Promise((ok) => setTimeout(ok, 2500))]).catch(() => {})
+  .then(setup).then(() => { t0 = performance.now(); requestAnimationFrame(tick); });
+
+let resizeTimer = 0;                                                  // big change of window shape -> rebuild
+addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (Math.abs(innerWidth / Math.max(1, innerHeight) - ASPECT) / ASPECT > 0.08) location.reload();
+  }, 400);
+});
+</script>
+</body>
+</html>

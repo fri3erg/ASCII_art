@@ -9,6 +9,8 @@ build step. You open it, and something starts moving.
 - **[kebabbo](projects/kebabbo)**: a döner kebab turning on its skewer forever, under a neon sign. 🥙
 - **[ricordi](projects/ricordi)**: five photos redrawn with letters, each with its own little animation. 📸
 - **[famiglia](projects/famiglia)**: the people and animals at home, drawn the same way. 🏡
+- **[auguri-joana](projects/auguri-joana)**: a birthday greeting for Joana, with the Portuguese flag, a pastel de nata
+  and a plate of pasta with chicken firmly crossed out. 🇵🇹
 - **[esn](projects/esn)**: the ESN star, turning and throwing sparks. ⭐ It's also the first slide of my
   letter to ESN Bologna. The other slides each have their own piece, with no words in them:
   - [02-pioggia](projects/lettera/02-pioggia): rain sliding down a dark window.
