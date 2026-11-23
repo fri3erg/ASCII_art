@@ -298,10 +298,11 @@ function draw(frame) {
 
 // ================================================================ play
 let t0 = 0, lastDraw = -1e9;
+const START_AT = Number(new URLSearchParams(location.search).get("t")) || 0;   // ?t=45 jumps ahead (for previews)
 function tick(now) {
   if (now - lastDraw >= 1000 / FPS - 2) {
     lastDraw = now;
-    const t = (now - t0) / 1000;
+    const t = (now - t0) / 1000 + START_AT;
     scene(t);
     draw(Math.floor(t * FPS));
   }

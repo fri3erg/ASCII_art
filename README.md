@@ -9,6 +9,7 @@ build step. You open it, and something starts moving.
 - **[kebabbo](projects/kebabbo)**: a döner kebab turning on its skewer forever, under a neon sign. 🥙
 - **[ricordi](projects/ricordi)**: five photos redrawn with letters, each with its own little animation. 📸
 - **[famiglia](projects/famiglia)**: the people and animals at home, drawn the same way. 🏡
+- **[esn](projects/esn)**: the ESN star, turning and throwing sparks. ⭐
 
 The `sources/` folder holds the original pages I started from. I kept them so I can borrow from them later.
 
