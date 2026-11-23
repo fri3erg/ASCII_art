@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lettera: le immagini</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💌</text></svg>">
+<style>
+  :root { --fg: #ddd; --dim: #888; --line: #333; --accent: #f0a040; }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header b { font-size: 16px; }
+  .group { display: flex; gap: 4px; flex-wrap: wrap; }
+  button { background: #111; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #666; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  main { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 12px; }
+  .frame { position: relative; flex: none; background: #000; outline: 1px dashed #222; transform-origin: center; }
+  .frame iframe { width: 100%; height: 100%; border: 0; display: block; pointer-events: none; }
+  .frame.fade iframe {                  /* the letter fades the frame's edges into black */
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent), linear-gradient(to bottom, transparent, #000 12%, #000 88%, transparent);
+    -webkit-mask-composite: source-in; mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent), linear-gradient(to bottom, transparent, #000 12%, #000 88%, transparent);
+    mask-composite: intersect; }
+  footer { padding: 10px 16px 14px; border-top: 1px solid var(--line); display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  #num { color: var(--accent); font-weight: 600; white-space: nowrap; }
+  #text { color: var(--dim); font-style: italic; flex: 1; min-width: 200px; }
+  #bar { height: 2px; background: var(--accent); width: 0; }
+</style>
+</head>
+<body>
+<header>
+  <b>💌 lettera</b>
+  <div class="group" id="sizes"></div>
+  <div class="group">
+    <button id="prev" title="← key">◀</button>
+    <button id="play" title="space">⏸ auto</button>
+    <button id="next" title="→ key">▶</button>
+    <button id="reload" title="R key">↻</button>
+    <button id="fade" class="on" title="F key">edge fade</button>
+  </div>
+</header>
+<main><div class="frame fade" id="frame"><iframe id="art" title="art"></iframe></div></main>
+<div id="bar"></div>
+<footer><span id="num"></span><span id="text"></span></footer>
+
+<script>
+"use strict";
+// Each slide's art, in the letter's order, with its paragraph (for mood only, not drawn).
+// Serve the projects/ folder (npx serve projects) and open /lettera/: slide 1 lives in ../esn.
+const SLIDES = [
+  ["../esn/", "Ciao amori miei. Sì lo so, grande sorpresa"],
+  ["02-pioggia/", "I didn't join ESN for a noble reason. I wanted friends, an excuse to leave the house…"],
+  ["03-alba/", "Then I fell in love with smiling at people… being a kind face in an unknown place"],
+  ["04-sezione/", "I started in a small section, a bit disorganised and very human… welcomed as a person, not a role"],
+  ["05-bologna/", "Bologna, I admit, scared me a bit: I imagined it organised, bureaucratic"],
+  ["06-limoncello/", "I didn't expect you. Your personalities, the limoncello, the party bags, the blessings…"],
+  ["07-faro/", "Here I can drown in my toxic search for being the most useful, kind and perfect lighthouse…"],
+  ["08-crime-night/", "My place is the tandems. Happy about what the websites brought to the evening…"],
+  ["09-cannone/", "So I put my head in the human cannon and aim at tandem coordinator and webmaster"],
+  ["10-ragnatele/", "(And maybe finally retire that ancient Jupiter and the bank-transfer payments :P)"],
+  ["11-bacio/", "Vi voglio bene stronzi. I know I can still give a lot to this section"],
+];
+// the frame shapes the art is shown in by the letter
+const SIZES = [["PC panel", 650, 800], ["phone top", 390, 440], ["full PC", 1280, 650], ["full phone", 390, 590]];
+const SLIDE_SECONDS = 12;
+
+const $ = (id) => document.getElementById(id);
+const frame = $("frame"), art = $("art");
+let k = 0, size = 0, auto = true, shownAt = 0;
+
+SIZES.forEach(([name, w, h], n) => {
+  const b = document.createElement("button");
+  b.textContent = `${name} ${w}×${h}`;
+  b.onclick = () => { size = n; layout(); show(); };
+  $("sizes").appendChild(b);
+});
+
+function layout() {                     // real CSS size of the frame, scaled down to fit if the window is smaller
+  const [, w, h] = SIZES[size];
+  frame.style.width = w + "px"; frame.style.height = h + "px";
+  const box = document.querySelector("main").getBoundingClientRect();
+  const s = Math.min(1, (box.width - 24) / w, (box.height - 24) / h);
+  frame.style.transform = `scale(${s})`;
+  frame.style.margin = `${-(h * (1 - s)) / 2}px ${-(w * (1 - s)) / 2}px`;
+  [...$("sizes").children].forEach((b, n) => b.classList.toggle("on", n === size));
+}
+function show() {                       // reloads the art, as the letter does each time a slide opens
+  art.src = "about:blank";
+  setTimeout(() => { art.src = SLIDES[k][0]; }, 30);
+  $("num").textContent = `${k + 1} / ${SLIDES.length}  ·  ${SLIDES[k][0].replace(/\/$/, "").replace("../", "")}`;
+  $("text").textContent = `“${SLIDES[k][1]}”`;
+  shownAt = performance.now();
+}
+const go = (d) => { k = (k + d + SLIDES.length) % SLIDES.length; show(); };
+$("prev").onclick = () => go(-1);
+$("next").onclick = () => go(1);
+$("reload").onclick = show;
+$("play").onclick = () => { auto = !auto; $("play").textContent = auto ? "⏸ auto" : "▶ auto"; shownAt = performance.now(); };
+$("fade").onclick = () => $("fade").classList.toggle("on", frame.classList.toggle("fade"));
+addEventListener("keydown", (e) => {
+  if (e.key === "ArrowRight") go(1);
+  else if (e.key === "ArrowLeft") go(-1);
+  else if (e.key === " ") { e.preventDefault(); $("play").click(); }
+  else if (e.key === "r" || e.key === "R") show();
+  else if (e.key === "f" || e.key === "F") $("fade").click();
+  else if (e.key >= "1" && e.key <= "4") { size = +e.key - 1; layout(); show(); }
+});
+addEventListener("resize", layout);
+(function tick() {
+  const p = (performance.now() - shownAt) / 1000 / SLIDE_SECONDS;
+  $("bar").style.width = auto ? Math.min(100, p * 100) + "%" : "0";
+  if (auto && p >= 1) go(1);
+  requestAnimationFrame(tick);
+})();
+layout(); show();
+</script>
+</body>
+</html>
